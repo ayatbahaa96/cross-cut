@@ -29,20 +29,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    .class-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 5px solid;
-        margin: 0.5rem 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .class-0 { border-color: #27ae60; }
-    .class-1 { border-color: #2ecc71; }
-    .class-2 { border-color: #f1c40f; }
-    .class-3 { border-color: #e67e22; }
-    .class-4 { border-color: #e74c3c; }
-    .class-5 { border-color: #c0392b; }
     .prediction-box {
         background: #f8f9fa;
         padding: 2rem;
@@ -58,6 +44,12 @@ st.markdown("""
         border-left: 5px solid #1f77b4;
         margin: 1rem 0;
     }
+    .class-0 { border-color: #27ae60; }
+    .class-1 { border-color: #2ecc71; }
+    .class-2 { border-color: #f1c40f; }
+    .class-3 { border-color: #e67e22; }
+    .class-4 { border-color: #e74c3c; }
+    .class-5 { border-color: #c0392b; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -92,7 +84,7 @@ def crop_square(pil_img: Image.Image, cx: int, cy: int, size: int) -> Image.Imag
     cropped = img[y1:y2, x1:x2]
     return Image.fromarray(cropped)
 
-def make_cut_mask(grid_gray: np.ndarray, thickness: int = 5) -> np.ndarray:
+def make_cut_mask(grid_gray: np.ndarray, thickness_px: int) -> np.ndarray:
     """Kesik çizgileri maskele: çizgileri bul, kalınlaştır, 0/255 maske üret."""
     edges = cv2.Canny(grid_gray, 30, 100)
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=40,
@@ -101,7 +93,7 @@ def make_cut_mask(grid_gray: np.ndarray, thickness: int = 5) -> np.ndarray:
     mask = np.zeros_like(grid_gray, dtype=np.uint8)
     if lines is not None:
         for l in lines[:, 0]:
-            cv2.line(mask, (l[0], l[1]), (l[2], l[3]), 255, thickness)
+            cv2.line(mask, (l[0], l[1]), (l[2], l[3]), 255, max(1, int(thickness_px)))
     mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
     return mask
 
@@ -125,7 +117,6 @@ def show_preprocessing_steps(preprocessing_steps):
         <p>5x5 grid yapısı için optimize edilmiş işleme pipeline'ı</p>
     </div>
     """, unsafe_allow_html=True)
-
     st.markdown("### İlk Satır")
     col1, col2, col3, col4 = st.columns(4)
     if 'original' in preprocessing_steps:
@@ -140,7 +131,6 @@ def show_preprocessing_steps(preprocessing_steps):
     if 'contrast_enhanced' in preprocessing_steps:
         with col4:
             img = preprocessing_steps['contrast_enhanced']; st.image(cv2.resize(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB), (250, 250)), caption="Kontrast Artırılmış")
-
     st.markdown("### İkinci Satır")
     col1, col2, col3, col4, col5 = st.columns(5)
     if 'bilateral' in preprocessing_steps:
@@ -213,7 +203,6 @@ class CrosscutClassifier:
             image_array = image
 
         preprocessing_steps = {}
-
         original = image_array.copy()
         h, w = original.shape[:2]
         if h != w:
@@ -227,61 +216,47 @@ class CrosscutClassifier:
 
         gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
         preprocessing_steps['grayscale'] = gray
-
         denoised = cv2.fastNlMeansDenoising(gray)
         preprocessing_steps['denoised'] = denoised
-
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         contrast_enhanced = clahe.apply(denoised)
         preprocessing_steps['contrast_enhanced'] = contrast_enhanced
-
         bilateral = cv2.bilateralFilter(contrast_enhanced, 9, 75, 75)
         preprocessing_steps['bilateral'] = bilateral
-
         kernel = np.ones((3, 3), np.uint8)
         opening = cv2.morphologyEx(bilateral, cv2.MORPH_OPEN, kernel)
         preprocessing_steps['morphology'] = opening
-
         adaptive_thresh = cv2.adaptiveThreshold(
             opening, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
         preprocessing_steps['adaptive_threshold'] = adaptive_thresh
-
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
         horizontal_lines = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_OPEN, horizontal_kernel)
-
         vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
         vertical_lines = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_OPEN, vertical_kernel)
-
         grid_lines = cv2.addWeighted(horizontal_lines, 0.5, vertical_lines, 0.5, 0.0)
         preprocessing_steps['grid_lines'] = grid_lines
-
         final_processed = cv2.addWeighted(opening, 0.8, grid_lines, 0.2, 0)
         preprocessing_steps['final_processed'] = final_processed
 
         processed_rgb = cv2.cvtColor(final_processed, cv2.COLOR_GRAY2RGB)
         processed_rgb = cv2.resize(processed_rgb, (224, 224)).astype(np.float32) / 255.0
         model_input = np.expand_dims(processed_rgb, axis=0)
-
         return model_input, preprocessing_steps
 
     # ------------------------- GRID BÖLGESİ -------------------------
     def detect_crosscut_grid_region(self, image):
         if isinstance(image, Image.Image):
             image = np.array(image.convert('RGB'))
-
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
             gray = image
-
         edges = cv2.Canny(gray, 50, 150)
         lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=50)
-
         if lines is None:
             h, w = gray.shape
             return {'x': w//4, 'y': h//4, 'width': w//2, 'height': h//2, 'detected': False}
-
         horizontal_lines, vertical_lines = [], []
         for line in lines:
             rho, theta = line[0]
@@ -289,16 +264,13 @@ class CrosscutClassifier:
                 horizontal_lines.append(rho)
             elif abs(theta - np.pi/2) < np.pi/4:
                 vertical_lines.append(rho)
-
         if len(horizontal_lines) < 4 or len(vertical_lines) < 4:
             h, w = gray.shape
             return {'x': w//4, 'y': h//4, 'width': w//2, 'height': h//2, 'detected': False}
-
         horizontal_lines.sort(); vertical_lines.sort()
         min_x = int(abs(min(vertical_lines))); max_x = int(abs(max(vertical_lines)))
         min_y = int(abs(min(horizontal_lines))); max_y = int(abs(max(horizontal_lines)))
         grid_width = max_x - min_x; grid_height = max_y - min_y
-
         return {
             'x': max(0, min_x - 20),
             'y': max(0, min_y - 20),
@@ -308,9 +280,8 @@ class CrosscutClassifier:
         }
 
     # ------------------------- 5x5 Analizi (kesikler maskeli) -------------------------
-    def analyze_5x5_grid_original(self, original_image):
-        """Yalnızca hücre içi kopmaları say (kesik çizgileri hariç)."""
-
+    def analyze_5x5_grid_original(self, original_image, spacing_mm: int = 1, strict_cell_damage: bool = True):
+        """Yalnızca hücre içi kopmaları say (kesik çizgileri hariç). spacing_mm: 1/2/3."""
         # PIL -> NumPy
         if isinstance(original_image, Image.Image):
             if original_image.mode == 'RGBA':
@@ -324,11 +295,7 @@ class CrosscutClassifier:
             work_image = original_image
 
         # Gri + grid bölgesi
-        if len(work_image.shape) == 3:
-            gray_full = cv2.cvtColor(work_image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray_full = work_image
-
+        gray_full = cv2.cvtColor(work_image, cv2.COLOR_RGB2GRAY) if len(work_image.shape) == 3 else work_image
         grid_region = self.detect_crosscut_grid_region(work_image)
         x, y, w, h = grid_region['x'], grid_region['y'], grid_region['width'], grid_region['height']
         grid_gray = gray_full[y:y+h, x:x+w]
@@ -361,8 +328,23 @@ class CrosscutClassifier:
         else:
             surface_type = "dark";  damage_detection_method = "flakes_excluding_cuts"
 
+        # Hücre boyutu ve piksel/mm tahmini
+        height, width = grid_gray.shape
+        cell_h = max(1, height // 5); cell_w = max(1, width // 5)
+        px_per_mm = max(1.0, ((cell_w + cell_h) / 2.0) / float(spacing_mm))
+
+        # Dinamik eşikler
+        thickness_px = int(np.clip(round(0.35 * px_per_mm), 2, 14))      # kesik kalınlığı maskesi
+        cell_area = cell_w * cell_h
+        if strict_cell_damage:
+            FLAKE_RATIO_THR = 0.003   # %0.3 hücre alanı
+            MIN_PIX = max(5, int(0.001 * cell_area))
+        else:
+            FLAKE_RATIO_THR = 0.02
+            MIN_PIX = max(30, int(0.005 * cell_area))
+
         # 1) Kesik çizgisi maskesi
-        cut_mask = make_cut_mask(grid_gray, thickness=5)
+        cut_mask = make_cut_mask(grid_gray, thickness_px)
         interior_mask = cv2.bitwise_not(cut_mask)
 
         # 2) Flake maskesi
@@ -372,15 +354,8 @@ class CrosscutClassifier:
         flake_mask_interior = cv2.bitwise_and(flake_mask, interior_mask)
 
         # Hücre bazında sayım
-        height, width = grid_gray.shape
-        cell_h = max(1, height // 5)
-        cell_w = max(1, width // 5)
-
         total_damaged_cells = 0.0
         cell_damage_scores = []
-        FLAKE_RATIO_THR = 0.02  # hücre içi alanın %2'si
-        MIN_PIX = 30            # min flake piksel
-
         interior_total = int(np.sum(interior_mask > 0))
         flake_interior_total = int(np.sum(flake_mask_interior > 0))
 
@@ -388,7 +363,6 @@ class CrosscutClassifier:
             for j in range(5):
                 y1 = i * cell_h; y2 = min(height, (i + 1) * cell_h)
                 x1 = j * cell_w;  x2 = min(width,  (j + 1) * cell_w)
-
                 cell_interior = interior_mask[y1:y2, x1:x2]
                 cell_flake    = flake_mask_interior[y1:y2, x1:x2]
 
@@ -406,22 +380,27 @@ class CrosscutClassifier:
         return {
             'grid_quality_score': float(grid_quality_score),
             'delamination_ratio': float(delamination_ratio),
-            'damaged_cells': float(total_damaged_cells),
+            'damaged_cells': float(total_damaged_cells),  # 0..25 tam sayı olur
             'total_cells': 25,
             'damage_percentage': (total_damaged_cells / 25.0) * 100.0,
             'cell_damage_scores': [float(x) for x in cell_damage_scores],
             'grid_detected': bool(lines is not None and len(lines) > 8),
-            'analysis_method': f'Grid Region Analysis - {surface_type} surface (cuts masked)',
+            'analysis_method': f'Grid Region Analysis - {surface_type} (cuts masked)',
             'surface_type': surface_type,
             'grid_region': {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)},
-            'damage_detection_method': damage_detection_method
+            'damage_detection_method': damage_detection_method,
+            'spacing_mm': spacing_mm,
+            'px_per_mm': px_per_mm,
+            'cut_thickness_px': thickness_px,
+            'cell_area_px': cell_area,
+            'flake_ratio_thr': FLAKE_RATIO_THR,
+            'min_pix': MIN_PIX
         }
 
     # ------------------------- PREDICT -------------------------
-    def predict(self, image):
+    def predict(self, image, spacing_mm: int = 1, strict_cell_damage: bool = True):
         if self.model is None:
             return None
-
         st.info("ADIM 1: Görüntü ön işleme başlıyor...")
         processed_input, preprocessing_steps = self.enhanced_preprocessing(image)
         st.success("Ön işleme tamamlandı!")
@@ -429,14 +408,13 @@ class CrosscutClassifier:
 
         st.info("ADIM 2: 5x5 Grid analizi başlıyor...")
         safe_np = np.array(image.convert('RGB')) if isinstance(image, Image.Image) else image
-        grid_analysis = self.analyze_5x5_grid_original(safe_np)
+        grid_analysis = self.analyze_5x5_grid_original(safe_np, spacing_mm=spacing_mm, strict_cell_damage=strict_cell_damage)
         st.success("Grid analizi tamamlandı!")
 
         st.info("ADIM 3: Model tahmini başlıyor...")
         _ = self.model.predict(processed_input)[0]  # demo
         predictions = self.generate_realistic_predictions(
-            grid_analysis['delamination_ratio'],
-            grid_analysis['damaged_cells']
+            damaged_cells_count=round(grid_analysis['damaged_cells'])
         )
         predicted_class = int(np.argmax(predictions))
         confidence = float(predictions[predicted_class])
@@ -451,27 +429,35 @@ class CrosscutClassifier:
             'class_info': self.iso_classes[predicted_class]
         }
 
-    def generate_realistic_predictions(self, delamination_ratio, damaged_cells):
-        probs = np.zeros(6)
-        if damaged_cells == 0:
-            dominant_class = 0
-        elif 0 < damaged_cells <= 1.25:
-            dominant_class = 1
-        elif 1.25 < damaged_cells <= 3.75:
-            dominant_class = 2
-        elif 3.75 < damaged_cells <= 8.75:
-            dominant_class = 3
-        elif 8.75 < damaged_cells <= 16.25:
-            dominant_class = 4
+    def generate_realistic_predictions(self, damaged_cells_count: int):
+        """
+        Sınıf eşleme tamamen hücre adedine göre:
+          0 hücre -> Class 0
+          1 hücre -> Class 1
+          2-3     -> Class 2
+          4-8     -> Class 3
+          9-16    -> Class 4
+          17-25   -> Class 5
+        """
+        n = int(damaged_cells_count)
+        if n == 0:
+            dominant = 0
+        elif n == 1:
+            dominant = 1
+        elif 2 <= n <= 3:
+            dominant = 2
+        elif 4 <= n <= 8:
+            dominant = 3
+        elif 9 <= n <= 16:
+            dominant = 4
         else:
-            dominant_class = 5
+            dominant = 5
 
-        probs[dominant_class] = 0.80 + np.random.random() * 0.15
-        remaining = 1.0 - probs[dominant_class]
-        for i in range(6):
-            if i != dominant_class:
-                probs[i] = remaining * (0.4 + np.random.random() * 0.3) if abs(i - dominant_class) == 1 \
-                           else remaining * (0.01 + np.random.random() * 0.05)
+        probs = np.zeros(6, dtype=np.float32)
+        probs[dominant] = 0.88
+        # komşu sınıflara küçük olasılık serpiştir
+        if dominant - 1 >= 0: probs[dominant - 1] = 0.06
+        if dominant + 1 <= 5: probs[dominant + 1] = 0.06
         return probs / probs.sum()
 
 # ------------------------------------------------------------
@@ -489,14 +475,16 @@ def main():
         st.session_state.classifier = CrosscutClassifier()
     classifier = st.session_state.classifier
 
+    # Sidebar: standart ve mm seçimi
     with st.sidebar:
-        st.header("📋 ISO 2409:2013 Standartı")
-        for i, class_info in classifier.iso_classes.items():
-            with st.expander(f"Sınıf {i} - {class_info['quality']}"):
-                st.write(f"**Tanım:** {class_info['description']}")
-                st.write(f"**Kriter:** {class_info['criteria']}")
+        st.header("📋 ISO 2409:2013")
+        st.info("📌 Kural: **Hücre içinde kopma yoksa = Class 0**. En küçük kopma varsa sınıf ≥1.")
+        spacing_mm = st.radio("Kesik aralığı (mm)", [1, 2, 3], index=0, horizontal=True)
+        strict_mode = st.checkbox("Katı hücre kuralı (tavsiye)", value=True)
         st.markdown("---")
-        st.info("📌 **Not:** Kesik çizgileri **hasar olarak sayılmaz** (maskelenir).")
+        st.write("Sınıf renkleri ve açıklamalar:")
+        for i, class_info in classifier.iso_classes.items():
+            st.markdown(f"- **Sınıf {i} – {class_info['quality']}**: {class_info['description']}")
 
     col1, col2 = st.columns([1.2, 1])
 
@@ -541,14 +529,12 @@ def main():
 
                 final_image = cropped_image
                 if contrast != 1.0 or brightness != 1.0:
-                    enhancer = ImageEnhance.Contrast(cropped_image)
-                    adj_image = enhancer.enhance(contrast)
-                    enhancer = ImageEnhance.Brightness(adj_image)
-                    adj_image = enhancer.enhance(brightness)
+                    enhancer = ImageEnhance.Contrast(cropped_image); adj_image = enhancer.enhance(contrast)
+                    enhancer = ImageEnhance.Brightness(adj_image);  adj_image = enhancer.enhance(brightness)
                     st.image(adj_image, caption=f"Ayarlanmış (K:{contrast:.1f}, P:{brightness:.1f})")
                     final_image = adj_image
 
-                result = classifier.predict(final_image)
+                result = classifier.predict(final_image, spacing_mm=int(spacing_mm), strict_cell_damage=bool(strict_mode))
                 if result:
                     st.session_state.prediction_result = result
             else:
@@ -559,7 +545,7 @@ def main():
         if 'prediction_result' in st.session_state:
             result = st.session_state.prediction_result
             class_info = result['class_info']
-            grid_analysis = result['grid_analysis']
+            g = result['grid_analysis']
 
             st.markdown(f"""
             <div class="prediction-box class-{result['predicted_class']}" style="border-color: {class_info['color']}">
@@ -572,20 +558,20 @@ def main():
 
             col_conf, col_delam, col_cells = st.columns(3)
             with col_conf:
-                st.metric("Güven Seviyesi", f"{result['confidence']:.1%}", help="Tahminin güvenilirlik seviyesi")
+                st.metric("Güven Seviyesi", f"{result['confidence']:.1%}")
             with col_delam:
-                st.metric("Ayrılma Oranı", f"{grid_analysis['delamination_ratio']:.2f}%", help="Kesik hariç alanda flake yüzdesi")
+                st.metric("Ayrılma Oranı", f"{g['delamination_ratio']:.2f}%")
             with col_cells:
-                st.metric("Hasarlı Hücre Adedi", f"{grid_analysis['damaged_cells']:.0f}/25", help="Sadece hücre içi flake varsa hücre hasarlı sayılır")
+                st.metric("Hasarlı Hücre Adedi", f"{round(g['damaged_cells'])}/25")
 
             st.subheader("🎯 Grid Analiz Sonuçları")
             grid_col1, grid_col2 = st.columns(2)
             with grid_col1:
-                st.metric("Grid Kalite Skoru", f"{grid_analysis['grid_quality_score']:.1f}/100")
-                st.metric("Hasar Yüzdesi", f"{grid_analysis['damage_percentage']:.1f}%")
+                st.metric("Grid Kalite Skoru", f"{g['grid_quality_score']:.1f}/100")
+                st.metric("Hasar Yüzdesi", f"{g['damage_percentage']:.1f}%")
             with grid_col2:
-                grid_status = "✅ Tespit Edildi" if grid_analysis['grid_detected'] else "❌ Tespit Edilemedi"
-                st.info(f"**5x5 Grid Durumu:** {grid_status}")
+                grid_status = "✅ Tespit Edildi" if g['grid_detected'] else "❌ Tespit Edilemedi"
+                st.info(f"**5x5 Grid Durumu:** {grid_status}\n\nKesik kalınlığı (px): {g['cut_thickness_px']}, px/mm: {g['px_per_mm']:.1f}")
 
             st.subheader("📈 Sınıf Olasılıkları")
             prob_data = pd.DataFrame({
@@ -593,11 +579,9 @@ def main():
                 'Olasılık': [prob * 100 for prob in result['probabilities']],
                 'Renk': [classifier.iso_classes[i]['color'] for i in range(6)]
             })
-            fig = px.bar(
-                prob_data, x='Sınıf', y='Olasılık',
-                color='Renk', color_discrete_map={c: c for c in prob_data['Renk']},
-                title="ISO Sınıf Olasılık Dağılımı"
-            )
+            fig = px.bar(prob_data, x='Sınıf', y='Olasılık',
+                         color='Renk', color_discrete_map={c: c for c in prob_data['Renk']},
+                         title="ISO Sınıf Olasılık Dağılımı")
             fig.update_layout(showlegend=False, height=400, yaxis_title="Olasılık (%)")
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -608,24 +592,24 @@ def main():
         with st.expander("🔬 Detaylı Grid Analizi"):
             g = st.session_state.prediction_result['grid_analysis']
             st.json({
-                "Analiz Metodu": g.get('analysis_method', 'Processed Image Analysis'),
-                "Yüzey Tipi": g.get('surface_type', 'Unknown'),
-                "Hasar Tespit Metodu": g.get('damage_detection_method', 'Unknown'),
-                "Grid Bölgesi": f"x:{g.get('grid_region', {}).get('x', 0)}, y:{g.get('grid_region', {}).get('y', 0)}, w:{g.get('grid_region', {}).get('width', 0)}, h:{g.get('grid_region', {}).get('height', 0)}",
-                "Grid Tespit Durumu": g['grid_detected'],
-                "Grid Kalite Skoru": f"{g['grid_quality_score']:.1f}/100",
-                "Hasarlı Hücre Adedi": f"{g['damaged_cells']:.0f}/25",
+                "Analiz Metodu": g.get('analysis_method'),
+                "Yüzey Tipi": g.get('surface_type'),
+                "Grid Bölgesi": f"x:{g['grid_region']['x']}, y:{g['grid_region']['y']}, w:{g['grid_region']['width']}, h:{g['grid_region']['height']}",
+                "Kesik Kalınlığı (px)": g.get('cut_thickness_px'),
+                "px/mm": f"{g.get('px_per_mm', 0):.2f}",
+                "Hücre Alanı (px^2)": g.get('cell_area_px'),
+                "Hücre Eşiği (oran)": g.get('flake_ratio_thr'),
+                "Hücre Eşiği (min px)": g.get('min_pix'),
+                "Hasarlı Hücre Adedi": f"{round(g['damaged_cells'])}/25",
                 "Hasar Yüzdesi": f"{g['damage_percentage']:.1f}%",
-                "Ayrılma Oranı (kesik hariç)": f"{g['delamination_ratio']:.2f}%",
-                "Tahmin Güven Seviyesi": f"{st.session_state.prediction_result['confidence']:.3f}",
-                "Sınıflandırma Kuralı": "Class 0: 0, Class 1: 0-1.25, Class 2: 1.25-3.75, Class 3: 3.75-8.75, Class 4: 8.75-16.25, Class 5: >16.25"
+                "Ayrılma Oranı (kesik hariç)": f"{g['delamination_ratio']:.2f}%"
             })
 
     st.markdown("---")
     c1, c2, c3 = st.columns(3)
     with c1: st.info("🎯 **Özellik:** 5x5 grid otomatik tespit")
     with c2: st.info("🧠 **Maske:** Kesik çizgileri hariç tutulur")
-    with c3: st.info("🔧 **Analiz:** Hücre içi flake tespiti")
+    with c3: st.info("🔧 **Kural:** Hücre içi en ufak kopma ⇒ sınıf ≥ 1")
 
 # ------------------------------------------------------------
 # Çalıştırma
