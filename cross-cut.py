@@ -608,21 +608,25 @@ def main():
         else:
             st.info("👆 Analiz için görüntü yükleyin")
     
-    # Ön işleme adımlarını göster
+    # Ön işleme adımlarını göster (artık predict içinde gösterildiği için burayı kaldırıyoruz)
+    # if 'prediction_result' in st.session_state:
+    #     st.markdown("---")
+    #     show_preprocessing_steps(st.session_state.prediction_result['preprocessing_steps'])
+        
+    # Detaylı analiz
     if 'prediction_result' in st.session_state:
         st.markdown("---")
-        show_preprocessing_steps(st.session_state.prediction_result['preprocessing_steps'])
-        
-        # Detaylı analiz
         with st.expander("🔬 Detaylı Grid Analizi"):
             grid_data = st.session_state.prediction_result['grid_analysis']
             st.json({
+                "Analiz Metodu": grid_data.get('analysis_method', 'Processed Image Analysis'),
                 "Grid Tespit Durumu": grid_data['grid_detected'],
                 "Grid Kalite Skoru": f"{grid_data['grid_quality_score']:.1f}/100",
-                "Hasarlı Hücre Sayısı": f"{grid_data['damaged_cells']}/25",
+                "Ağırlıklı Hasarlı Hücre Skoru": f"{grid_data['damaged_cells']:.2f}/25",
                 "Hasar Yüzdesi": f"{grid_data['damage_percentage']:.1f}%",
                 "Ayrılma Oranı": f"{grid_data['delamination_ratio']:.1f}%",
-                "Tahmin Güven Seviyesi": f"{st.session_state.prediction_result['confidence']:.3f}"
+                "Tahmin Güven Seviyesi": f"{st.session_state.prediction_result['confidence']:.3f}",
+                "Sınıflandırma Kuralı": "Class 0: 0, Class 1: 0-1.25, Class 2: 1.25-3.75, Class 3: 3.75-8.75, Class 4: 8.75-16.25, Class 5: >16.25"
             })
     
     # Alt bilgi
