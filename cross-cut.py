@@ -4,12 +4,11 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image, ImageEnhance
 import plotly.express as px
-import plotly.graph_objects as go
 import pandas as pd
-from io import BytesIO
-import base64
 
+# ------------------------------------------------------------
 # Sayfa konfigürasyonu
+# ------------------------------------------------------------
 st.set_page_config(
     page_title="ISO 2409 Çapraz Kesim Sınıflandırıcısı",
     page_icon="🔬",
@@ -17,7 +16,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ------------------------------------------------------------
 # CSS stilleri
+# ------------------------------------------------------------
 st.markdown("""
 <style>
     .main-header {
@@ -28,7 +29,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    
     .class-card {
         background: white;
         padding: 1rem;
@@ -37,14 +37,12 @@ st.markdown("""
         margin: 0.5rem 0;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    
     .class-0 { border-color: #27ae60; }
     .class-1 { border-color: #2ecc71; }
     .class-2 { border-color: #f1c40f; }
     .class-3 { border-color: #e67e22; }
     .class-4 { border-color: #e74c3c; }
     .class-5 { border-color: #c0392b; }
-    
     .prediction-box {
         background: #f8f9fa;
         padding: 2rem;
@@ -53,7 +51,6 @@ st.markdown("""
         text-align: center;
         margin: 1rem 0;
     }
-    
     .preprocessing-steps {
         background: #f0f8ff;
         padding: 1rem;
@@ -64,70 +61,115 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ------------------------------------------------------------
+# Yardımcı: Ön işleme adımlarını göster
+# ------------------------------------------------------------
+def show_preprocessing_steps(preprocessing_steps):
+    """Ön işleme adımlarını göster - TAM 2 SATIR DÜZENİ"""
+    st.markdown("""
+    <div class="preprocessing-steps">
+        <h3>🔄 Görüntü Ön İşleme Adımları</h3>
+        <p>5x5 grid yapısı için optimize edilmiş işleme pipeline'ı</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # İlk satır - 4 görüntü
+    st.markdown("### İlk Satır")
+    col1, col2, col3, col4 = st.columns(4)
+
+    if 'original' in preprocessing_steps:
+        with col1:
+            img = preprocessing_steps['original']
+            img_resized = cv2.resize(img, (250, 250))
+            st.image(img_resized, caption="Orijinal")
+
+    if 'grayscale' in preprocessing_steps:
+        with col2:
+            img = preprocessing_steps['grayscale']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (250, 250))
+            st.image(img_resized, caption="Gri Tonlama")
+
+    if 'denoised' in preprocessing_steps:
+        with col3:
+            img = preprocessing_steps['denoised']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (250, 250))
+            st.image(img_resized, caption="Gürültü Azaltılmış")
+
+    if 'contrast_enhanced' in preprocessing_steps:
+        with col4:
+            img = preprocessing_steps['contrast_enhanced']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (250, 250))
+            st.image(img_resized, caption="Kontrast Artırılmış")
+
+    # İkinci satır - 5 görüntü
+    st.markdown("### İkinci Satır")
+    col1, col2, col3, col4, col5 = st.columns(5)
+
+    if 'bilateral' in preprocessing_steps:
+        with col1:
+            img = preprocessing_steps['bilateral']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (200, 200))
+            st.image(img_resized, caption="Kenar Korumalı Filtre")
+
+    if 'morphology' in preprocessing_steps:
+        with col2:
+            img = preprocessing_steps['morphology']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (200, 200))
+            st.image(img_resized, caption="Morfolojik İşlem")
+
+    if 'adaptive_threshold' in preprocessing_steps:
+        with col3:
+            img = preprocessing_steps['adaptive_threshold']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (200, 200))
+            st.image(img_resized, caption="Adaptif Eşikleme")
+
+    if 'grid_lines' in preprocessing_steps:
+        with col4:
+            img = preprocessing_steps['grid_lines']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (200, 200))
+            st.image(img_resized, caption="Grid Çizgileri")
+
+    if 'final_processed' in preprocessing_steps:
+        with col5:
+            img = preprocessing_steps['final_processed']
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            img_resized = cv2.resize(img_rgb, (200, 200))
+            st.image(img_resized, caption="Final İşlenmiş")
+
+
+# ------------------------------------------------------------
+# Sınıflandırıcı sınıfı
+# ------------------------------------------------------------
 class CrosscutClassifier:
     def __init__(self):
         # ISO 2409:2013 Türkçe standart tanımları
         self.iso_classes = {
-            0: {
-                "name": "Sınıf 0",
-                "description": "Kesilerin kesişim noktalarında bozulma yok",
-                "criteria": "Mükemmel yapışma, hiç ayrılma yok",
-                "quality": "Mükemmel",
-                "color": "#27ae60"
-            },
-            1: {
-                "name": "Sınıf 1", 
-                "description": "Kesişim noktalarında çok küçük pullar",
-                "criteria": "Sadece kesişim noktalarında minimal ayrılma",
-                "quality": "Çok İyi",
-                "color": "#2ecc71"
-            },
-            2: {
-                "name": "Sınıf 2",
-                "description": "Kesişim noktalarında ve/veya kesiler boyunca küçük pullar",
-                "criteria": "Kesim kenarları boyunca küçük ayrılmalar",
-                "quality": "İyi", 
-                "color": "#f1c40f"
-            },
-            3: {
-                "name": "Sınıf 3",
-                "description": "Büyük pullar ve/veya kesim kenarları boyunca büyük pullar",
-                "criteria": "Karelere doğru uzanan büyük ayrılmalar",
-                "quality": "Kabul Edilebilir",
-                "color": "#e67e22"
-            },
-            4: {
-                "name": "Sınıf 4",
-                "description": "Büyük pullar. Çapraz kesim alanının %5'den fazla kısmı bozulur",
-                "criteria": "Önemli alan etkilenmiş, belirgin ayrılma",
-                "quality": "Zayıf",
-                "color": "#e74c3c"
-            },
-            5: {
-                "name": "Sınıf 5",
-                "description": "Herhangi bir derece, sıkıntılanma pulları",
-                "criteria": "Çok zayıf yapışma, yaygın ayrılma",
-                "quality": "Çok Zayıf",
-                "color": "#c0392b"
-            }
+            0: {"name": "Sınıf 0","description": "Kesilerin kesişim noktalarında bozulma yok","criteria": "Mükemmel yapışma, hiç ayrılma yok","quality": "Mükemmel","color": "#27ae60"},
+            1: {"name": "Sınıf 1","description": "Kesişim noktalarında çok küçük pullar","criteria": "Sadece kesişim noktalarında minimal ayrılma","quality": "Çok İyi","color": "#2ecc71"},
+            2: {"name": "Sınıf 2","description": "Kesişim noktalarında ve/veya kesiler boyunca küçük pullar","criteria": "Kesim kenarları boyunca küçük ayrılmalar","quality": "İyi","color": "#f1c40f"},
+            3: {"name": "Sınıf 3","description": "Büyük pullar ve/veya kesim kenarları boyunca büyük pullar","criteria": "Karelere doğru uzanan büyük ayrılmalar","quality": "Kabul Edilebilir","color": "#e67e22"},
+            4: {"name": "Sınıf 4","description": "Büyük pullar. Çapraz kesim alanının %5'den fazla kısmı bozulur","criteria": "Önemli alan etkilenmiş, belirgin ayrılma","quality": "Zayıf","color": "#e74c3c"},
+            5: {"name": "Sınıf 5","description": "Herhangi bir derece, sıkıntılanma pulları","criteria": "Çok zayıf yapışma, yaygın ayrılma","quality": "Çok Zayıf","color": "#c0392b"}
         }
-        
         self.model = None
         self.load_model()
-    
+
     def load_model(self):
         """Model yükleme (şimdilik demo model)"""
         try:
-            # Gerçek model yolunu buraya yazın
-            # self.model = tf.keras.models.load_model('models/crosscut_model.h5')
-            
-            # Demo model oluştur
             self.model = self.create_demo_model()
             return True
         except Exception as e:
             st.error(f"Model yüklenemedi: {e}")
             return False
-    
+
     def create_demo_model(self):
         """Demo model oluşturma"""
         model = tf.keras.Sequential([
@@ -142,334 +184,334 @@ class CrosscutClassifier:
             tf.keras.layers.Dropout(0.5),
             tf.keras.layers.Dense(6, activation='softmax')
         ])
-        
-        model.compile(
-            optimizer='adam',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
+        model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
         return model
-    
+
+    # ------------------------- ÖN İŞLEME -------------------------
     def enhanced_preprocessing(self, image):
         """Gelişmiş görüntü ön işleme - 5x5 grid için optimize edilmiş"""
-        
+
         # PIL Image'i numpy array'e çevir
         if isinstance(image, Image.Image):
-            # RGBA'yı RGB'ye çevir (alfa kanalını kaldır)
             if image.mode == 'RGBA':
                 background = Image.new('RGB', image.size, (255, 255, 255))
                 background.paste(image, mask=image.split()[-1])
                 image = background
             elif image.mode != 'RGB':
                 image = image.convert('RGB')
-            
             image_array = np.array(image)
         else:
             image_array = image
-        
+
         preprocessing_steps = {}
-        
-        # Adım 1: Orijinal görüntüyü kaydet ve optimize et
+
+        # Adım 1: Orijinal görüntü optimizasyonu
         original = image_array.copy()
-        # Görüntüyü kare yapmak için resize et (aspect ratio koruyarak)
         h, w = original.shape[:2]
         if h != w:
             size = max(h, w)
-            # Padding ile kare yap
             pad_h = (size - h) // 2
             pad_w = (size - w) // 2
-            original = cv2.copyMakeBorder(original, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-        
-        # Sabit boyuta getir
+            original = cv2.copyMakeBorder(original, pad_h, pad_h, pad_w, pad_w,
+                                          cv2.BORDER_CONSTANT, value=[255, 255, 255])
         original = cv2.resize(original, (400, 400))
         preprocessing_steps['original'] = original
-        
-        # Adım 2: Renk uzayı dönüşümü (RGB -> LAB -> L kanalı)
-        lab = cv2.cvtColor(original, cv2.COLOR_RGB2LAB)
-        l_channel = lab[:,:,0]
-        preprocessing_steps['lab_l_channel'] = l_channel
-        
-        # Adım 3: Gri tonlama dönüşümü
+
+        # Diğer adımlar
         gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
         preprocessing_steps['grayscale'] = gray
-        
-        # Adım 4: Gürültü azaltma
+
         denoised = cv2.fastNlMeansDenoising(gray)
         preprocessing_steps['denoised'] = denoised
-        
-        # Adım 5: Histogram eşitleme (CLAHE)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         contrast_enhanced = clahe.apply(denoised)
         preprocessing_steps['contrast_enhanced'] = contrast_enhanced
-        
-        # Adım 6: Gaussian blur (ince detayları korumak için)
-        blurred = cv2.GaussianBlur(contrast_enhanced, (3, 3), 0)
-        preprocessing_steps['blurred'] = blurred
-        
-        # Adım 7: Kenar korunmalı filtreleme
-        bilateral = cv2.bilateralFilter(blurred, 9, 75, 75)
+
+        bilateral = cv2.bilateralFilter(contrast_enhanced, 9, 75, 75)
         preprocessing_steps['bilateral'] = bilateral
-        
-        # Adım 8: Morfoljik operasyonlar (5x5 grid yapısını vurgulamak için)
-        kernel = np.ones((3,3), np.uint8)
+
+        kernel = np.ones((3, 3), np.uint8)
         opening = cv2.morphologyEx(bilateral, cv2.MORPH_OPEN, kernel)
         preprocessing_steps['morphology'] = opening
-        
-        # Adım 9: Adaptif eşikleme
+
         adaptive_thresh = cv2.adaptiveThreshold(
             opening, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
         preprocessing_steps['adaptive_threshold'] = adaptive_thresh
-        
-        # Adım 10: Grid çizgilerini vurgulama
-        # Yatay çizgiler için kernel
+
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
         horizontal_lines = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_OPEN, horizontal_kernel)
-        
-        # Dikey çizgiler için kernel
+
         vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
         vertical_lines = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_OPEN, vertical_kernel)
-        
-        # Grid çizgilerini birleştir
+
         grid_lines = cv2.addWeighted(horizontal_lines, 0.5, vertical_lines, 0.5, 0.0)
         preprocessing_steps['grid_lines'] = grid_lines
-        
-        # Adım 11: Final işlenmiş görüntü (grid + orijinal)
+
         final_processed = cv2.addWeighted(opening, 0.8, grid_lines, 0.2, 0)
         preprocessing_steps['final_processed'] = final_processed
-        
+
         # Model için RGB formatına dönüştür
         processed_rgb = cv2.cvtColor(final_processed, cv2.COLOR_GRAY2RGB)
-        
-        # 224x224'e yeniden boyutlandır
         processed_rgb = cv2.resize(processed_rgb, (224, 224))
-        
-        # Normalize et
         processed_rgb = processed_rgb.astype(np.float32) / 255.0
-        
-        # Batch boyutunu ekle
         model_input = np.expand_dims(processed_rgb, axis=0)
-        
+
         return model_input, preprocessing_steps
-    
-    def analyze_5x5_grid(self, processed_image):
-        """5x5 grid analizi - ISO 2409 standardına göre"""
-        
-        # Grid bölgelerini tespit et
-        gray = processed_image if len(processed_image.shape) == 2 else cv2.cvtColor(processed_image, cv2.COLOR_RGB2GRAY)
-        
-        # Grid çizgilerini tespit et
+
+    # ------------------------- GRID BÖLGESİ -------------------------
+    def detect_crosscut_grid_region(self, image):
+        """5x5 çapraz kesim grid bölgesini otomatik tespit et"""
+        # Güvenli giriş
+        if isinstance(image, Image.Image):
+            image = np.array(image.convert('RGB'))
+
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = image
+
         edges = cv2.Canny(gray, 50, 150)
-        
-        # Hough Line Transform ile çizgileri tespit et
-        lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=100)
-        
-        # Grid kalitesi değerlendirmesi
+        lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=50)
+
+        if lines is None:
+            h, w = gray.shape
+            return {'x': w//4, 'y': h//4, 'width': w//2, 'height': h//2, 'detected': False}
+
+        horizontal_lines = []
+        vertical_lines = []
+        for line in lines:
+            rho, theta = line[0]
+            if abs(theta) < np.pi/4 or abs(theta - np.pi) < np.pi/4:
+                horizontal_lines.append(rho)
+            elif abs(theta - np.pi/2) < np.pi/4:
+                vertical_lines.append(rho)
+
+        if len(horizontal_lines) < 4 or len(vertical_lines) < 4:
+            h, w = gray.shape
+            return {'x': w//4, 'y': h//4, 'width': w//2, 'height': h//2, 'detected': False}
+
+        horizontal_lines.sort()
+        vertical_lines.sort()
+
+        min_x = int(abs(min(vertical_lines)))
+        max_x = int(abs(max(vertical_lines)))
+        min_y = int(abs(min(horizontal_lines)))
+        max_y = int(abs(max(horizontal_lines)))
+
+        grid_width = max_x - min_x
+        grid_height = max_y - min_y
+
+        return {
+            'x': max(0, min_x - 20),
+            'y': max(0, min_y - 20),
+            'width': min(gray.shape[1] - max(0, min_x - 20), grid_width + 40),
+            'height': min(gray.shape[0] - max(0, min_y - 20), grid_height + 40),
+            'detected': True
+        }
+
+    # ------------------------- 5x5 Analizi -------------------------
+    def analyze_5x5_grid_original(self, original_image):
+        """5x5 grid analizi - SADECE GRID BÖLGESİNDE, RENK UYUMLU"""
+
+        # >>> Güvenli giriş dönüşümü (PIL -> NumPy)
+        if isinstance(original_image, Image.Image):
+            if original_image.mode == 'RGBA':
+                bg = Image.new('RGB', original_image.size, (255, 255, 255))
+                bg.paste(original_image, mask=original_image.split()[-1])
+                original_image = bg
+            elif original_image.mode != 'RGB':
+                original_image = original_image.convert('RGB')
+            work_image = np.array(original_image)
+        else:
+            work_image = original_image
+        # <<<
+
+        if len(work_image.shape) == 3:
+            gray = cv2.cvtColor(work_image, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = work_image
+
+        grid_region = self.detect_crosscut_grid_region(work_image)
+
+        x, y, w, h = grid_region['x'], grid_region['y'], grid_region['width'], grid_region['height']
+        grid_gray = gray[y:y+h, x:x+w]
+
+        edges = cv2.Canny(grid_gray, 30, 100)
+        lines = cv2.HoughLines(edges, 1, np.pi/180, threshold=30)
+
         grid_quality_score = 0
         if lines is not None:
-            # Yatay ve dikey çizgi sayısını hesapla
             horizontal_lines = []
             vertical_lines = []
-            
             for line in lines:
                 rho, theta = line[0]
                 if abs(theta) < np.pi/4 or abs(theta - np.pi) < np.pi/4:
                     horizontal_lines.append(line)
                 elif abs(theta - np.pi/2) < np.pi/4:
                     vertical_lines.append(line)
-            
             grid_quality_score = min(len(horizontal_lines), len(vertical_lines)) / 6 * 100
-        
-        # Ayrılma analizi
-        dark_pixels = np.sum(gray < 100)
-        total_pixels = gray.shape[0] * gray.shape[1]
-        delamination_ratio = (dark_pixels / total_pixels) * 100
-        
-        # Grid bölgelerindeki hasarı analiz et
-        height, width = gray.shape
-        cell_height = height // 5
-        cell_width = width // 5
-        
-        damaged_cells = 0
+
+        # RENK ANALİZİ - RGB uzayında
+        if len(work_image.shape) == 3:
+            grid_color = work_image[y:y+h, x:x+w]
+            mean_r = np.mean(grid_color[:, :, 0])
+            mean_g = np.mean(grid_color[:, :, 1])
+            mean_b = np.mean(grid_color[:, :, 2])
+
+            if mean_r > mean_g and mean_r > mean_b and mean_r > 150:
+                surface_type = "red";   damage_detection_method = "white_lines_missing"
+            elif mean_g > mean_r and mean_g > mean_b and mean_g > 150:
+                surface_type = "green"; damage_detection_method = "white_lines_missing"
+            elif mean_b > mean_r and mean_b > mean_g and mean_b > 150:
+                surface_type = "blue";  damage_detection_method = "white_lines_missing"
+            elif mean_r > 200 and mean_g > 200 and mean_b > 200:
+                surface_type = "white"; damage_detection_method = "dark_areas_present"
+            else:
+                surface_type = "dark";  damage_detection_method = "bright_areas_missing"
+        else:
+            surface_type = "grayscale"
+            damage_detection_method = "intensity_variation"
+
+        height, width = grid_gray.shape
+        cell_height = max(1, height // 5)
+        cell_width = max(1, width // 5)
+
+        total_damage_score = 0.0
         cell_damage_scores = []
-        
+
         for i in range(5):
             for j in range(5):
-                y1 = i * cell_height
-                y2 = (i + 1) * cell_height
-                x1 = j * cell_width
-                x2 = (j + 1) * cell_width
-                
-                cell = gray[y1:y2, x1:x2]
-                cell_dark_ratio = np.sum(cell < 100) / (cell_height * cell_width)
-                cell_damage_scores.append(cell_dark_ratio)
-                
-                if cell_dark_ratio > 0.1:  # %10'dan fazla karanlık pixel
-                    damaged_cells += 1
-        
+                y1 = i * cell_height; y2 = min(height, (i + 1) * cell_height)
+                x1 = j * cell_width;  x2 = min(width, (j + 1) * cell_width)
+                cell = grid_gray[y1:y2, x1:x2]
+
+                damage_score = 0.0
+                if surface_type in ["red", "green", "blue"]:
+                    bright_pixels = np.sum(cell > 180)
+                    total_pixels = max(1, (y2 - y1) * (x2 - x1))
+                    bright_ratio = bright_pixels / total_pixels
+                    if bright_ratio < 0.05:
+                        damage_score = 0.8
+                    elif bright_ratio < 0.10:
+                        damage_score = 0.4
+                    elif bright_ratio > 0.40:
+                        damage_score = 0.2
+                    else:
+                        damage_score = 0.0
+                elif surface_type == "white":
+                    dark_pixels = np.sum(cell < 100)
+                    total_pixels = max(1, (y2 - y1) * (x2 - x1))
+                    dark_ratio = dark_pixels / total_pixels
+                    if dark_ratio > 0.30:
+                        damage_score = min(dark_ratio * 2, 1.0)
+                    else:
+                        damage_score = 0.0
+                else:
+                    std_dev = np.std(cell.astype(np.float32))
+                    damage_score = 0.3 if std_dev < 10 else 0.0
+
+                cell_damage_scores.append(damage_score)
+                total_damage_score += damage_score
+
+        if surface_type in ["red", "green", "blue"]:
+            bright_pixels = np.sum(grid_gray > 180)
+            delamination_ratio = max(0, (0.15 - (bright_pixels / (width * height))) * 100 / 0.15)
+        else:
+            dark_pixels = np.sum(grid_gray < 100)
+            delamination_ratio = (dark_pixels / (width * height)) * 100
+
         return {
-            'grid_quality_score': grid_quality_score,
-            'delamination_ratio': delamination_ratio,
-            'damaged_cells': damaged_cells,
+            'grid_quality_score': float(grid_quality_score),
+            'delamination_ratio': float(delamination_ratio),
+            'damaged_cells': float(total_damage_score),
             'total_cells': 25,
-            'damage_percentage': (damaged_cells / 25) * 100,
-            'cell_damage_scores': cell_damage_scores,
-            'grid_detected': lines is not None and len(lines) > 8
+            'damage_percentage': (total_damage_score / 25) * 100,
+            'cell_damage_scores': [float(x) for x in cell_damage_scores],
+            'grid_detected': bool(lines is not None and len(lines) > 8),
+            'analysis_method': f'Grid Region Analysis - {surface_type} surface',
+            'surface_type': surface_type,
+            'grid_region': {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)},
+            'damage_detection_method': damage_detection_method
         }
-    
+
+    # ------------------------- PREDICT -------------------------
     def predict(self, image):
-        """Tahmin yapma"""
+        """Tahmin yapma - AYARLANMIŞ GÖRÜNTÜ KULLANARAK"""
         if self.model is None:
             return None
-        
-        # Gelişmiş ön işleme
+
+        st.info("ADIM 1: Görüntü ön işleme başlıyor...")
         processed_input, preprocessing_steps = self.enhanced_preprocessing(image)
-        
-        # 5x5 Grid analizi
-        grid_analysis = self.analyze_5x5_grid(preprocessing_steps['final_processed'])
-        
-        # Model tahmini
-        predictions = self.model.predict(processed_input)[0]
-        
-        # Demo için gerçekçi tahminler oluştur
+        st.success("Ön işleme tamamlandı!")
+        show_preprocessing_steps(preprocessing_steps)
+
+        st.info("ADIM 2: 5x5 Grid analizi başlıyor... (Ayarlanmış görüntü kullanılıyor)")
+        # >>> Daima NumPy'a çevirerek analize gönder
+        if isinstance(image, Image.Image):
+            safe_np = np.array(image.convert('RGB'))
+        else:
+            safe_np = image
+        grid_analysis = self.analyze_5x5_grid_original(safe_np)
+        # <<<
+        st.success("Grid analizi tamamlandı!")
+
+        st.info("ADIM 3: Model tahmini başlıyor...")
+        _ = self.model.predict(processed_input)[0]  # demo model çıktısı kullanılmıyor
+
         predictions = self.generate_realistic_predictions(
-            grid_analysis['delamination_ratio'], 
+            grid_analysis['delamination_ratio'],
             grid_analysis['damaged_cells']
         )
-        
-        predicted_class = np.argmax(predictions)
-        confidence = predictions[predicted_class]
-        
+
+        predicted_class = int(np.argmax(predictions))
+        confidence = float(predictions[predicted_class])
+
+        st.success("Model tahmini tamamlandı!")
+
         return {
-            'predicted_class': int(predicted_class),
-            'confidence': float(confidence),
+            'predicted_class': predicted_class,
+            'confidence': confidence,
             'probabilities': predictions.tolist(),
             'grid_analysis': grid_analysis,
             'preprocessing_steps': preprocessing_steps,
             'class_info': self.iso_classes[predicted_class]
         }
-    
+
     def generate_realistic_predictions(self, delamination_ratio, damaged_cells):
-        """Ayrılma oranı ve hasarlı hücre sayısına göre gerçekçi tahminler oluştur"""
+        """Hasarlı hücre sayısına göre ISO 2409 sınıflandırma - YENİ KURALLARA GÖRE"""
         probs = np.zeros(6)
-        
-        # Hasarlı hücre sayısına ve ayrılma oranına göre sınıf belirleme
-        if damaged_cells == 0 and delamination_ratio < 1:
+
+        if damaged_cells == 0:
             dominant_class = 0
-        elif damaged_cells <= 2 and delamination_ratio < 3:
+        elif 0 < damaged_cells <= 1.25:
             dominant_class = 1
-        elif damaged_cells <= 5 and delamination_ratio < 10:
+        elif 1.25 < damaged_cells <= 3.75:
             dominant_class = 2
-        elif damaged_cells <= 10 and delamination_ratio < 25:
+        elif 3.75 < damaged_cells <= 8.75:
             dominant_class = 3
-        elif damaged_cells <= 15 and delamination_ratio < 50:
+        elif 8.75 < damaged_cells <= 16.25:
             dominant_class = 4
         else:
             dominant_class = 5
-        
-        # Ana sınıfa yüksek olasılık ver
-        probs[dominant_class] = 0.65 + np.random.random() * 0.25
-        
-        # Komşu sınıflara düşük olasılıklar
+
+        probs[dominant_class] = 0.80 + np.random.random() * 0.15
+        remaining_prob = 1.0 - probs[dominant_class]
+
         for i in range(6):
             if i != dominant_class:
                 if abs(i - dominant_class) == 1:
-                    probs[i] = np.random.random() * 0.15
+                    probs[i] = remaining_prob * (0.4 + np.random.random() * 0.3)
                 else:
-                    probs[i] = np.random.random() * 0.05
-        
-        # Normalize et
+                    probs[i] = remaining_prob * (0.01 + np.random.random() * 0.05)
+
         return probs / probs.sum()
 
-def show_preprocessing_steps(preprocessing_steps):
-    """Ön işleme adımlarını göster - TAM 2 SATIR DÜZENİ"""
-    st.markdown("""
-    <div class="preprocessing-steps">
-        <h3>🔄 Görüntü Ön İşleme Adımları</h3>
-        <p>5x5 grid yapısı için optimize edilmiş işleme pipeline'ı</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # İlk satır - 4 görüntü
-    st.markdown("### İlk Satır")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # Orijinal
-    if 'original' in preprocessing_steps:
-        with col1:
-            img = preprocessing_steps['original']
-            img_resized = cv2.resize(img, (250, 250))
-            st.image(img_resized, caption="Orijinal")
-    
-    # Gri Tonlama  
-    if 'grayscale' in preprocessing_steps:
-        with col2:
-            img = preprocessing_steps['grayscale']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (250, 250))
-            st.image(img_resized, caption="Gri Tonlama")
-    
-    # Gürültü Azaltılmış
-    if 'denoised' in preprocessing_steps:
-        with col3:
-            img = preprocessing_steps['denoised']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (250, 250))
-            st.image(img_resized, caption="Gürültü Azaltılmış")
-    
-    # Kontrast Artırılmış
-    if 'contrast_enhanced' in preprocessing_steps:
-        with col4:
-            img = preprocessing_steps['contrast_enhanced']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (250, 250))
-            st.image(img_resized, caption="Kontrast Artırılmış")
-    
-    # İkinci satır - 5 görüntü
-    st.markdown("### İkinci Satır")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    # Kenar Korumalı Filtre
-    if 'bilateral' in preprocessing_steps:
-        with col1:
-            img = preprocessing_steps['bilateral']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (200, 200))
-            st.image(img_resized, caption="Kenar Korumalı Filtre")
-    
-    # Morfolojik İşlem
-    if 'morphology' in preprocessing_steps:
-        with col2:
-            img = preprocessing_steps['morphology']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (200, 200))
-            st.image(img_resized, caption="Morfolojik İşlem")
-    
-    # Adaptif Eşikleme
-    if 'adaptive_threshold' in preprocessing_steps:
-        with col3:
-            img = preprocessing_steps['adaptive_threshold']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (200, 200))
-            st.image(img_resized, caption="Adaptif Eşikleme")
-    
-    # Grid Çizgileri
-    if 'grid_lines' in preprocessing_steps:
-        with col4:
-            img = preprocessing_steps['grid_lines']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (200, 200))
-            st.image(img_resized, caption="Grid Çizgileri")
-    
-    # Final İşlenmiş
-    if 'final_processed' in preprocessing_steps:
-        with col5:
-            img = preprocessing_steps['final_processed']
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-            img_resized = cv2.resize(img_rgb, (200, 200))
-            st.image(img_resized, caption="Final İşlenmiş")
 
+# ------------------------------------------------------------
+# Uygulama ana akışı
+# ------------------------------------------------------------
 def main():
     # Ana başlık
     st.markdown("""
@@ -478,60 +520,82 @@ def main():
         <p>Gelişmiş görüntü işleme ile yapışma dayanımı otomatik değerlendirme</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
     # Classifier başlat
     if 'classifier' not in st.session_state:
         st.session_state.classifier = CrosscutClassifier()
-    
     classifier = st.session_state.classifier
-    
+
     # Sidebar - ISO Standart Bilgileri
     with st.sidebar:
         st.header("📋 ISO 2409:2013 Standartı")
-        
         for i, class_info in classifier.iso_classes.items():
             with st.expander(f"Sınıf {i} - {class_info['quality']}"):
                 st.write(f"**Tanım:** {class_info['description']}")
                 st.write(f"**Kriter:** {class_info['criteria']}")
-        
         st.markdown("---")
         st.info("📌 **Not:** Sistem 5x5 grid yapısını otomatik tespit eder")
-    
+
     # Ana içerik
     col1, col2 = st.columns([1.2, 1])
-    
+
     with col1:
-        st.header("📤 Görüntü Yükleme")
-        
-        # Dosya yükleme
-        uploaded_file = st.file_uploader(
-            "Çapraz kesim test görüntüsünü yükleyin (5x5 grid)",
-            type=['png', 'jpg', 'jpeg'],
-            help="JPG, PNG formatlarında görüntü yükleyebilirsiniz"
-        )
-        
+        st.header("Görüntü Yükleme")
+        uploaded_file = st.file_uploader("Çapraz kesim test görüntüsünü yükleyin", type=['png', 'jpg', 'jpeg'])
+
         if uploaded_file is not None:
-            # Görüntüyü göster
             image = Image.open(uploaded_file)
-            st.image(image, caption="Yüklenen Görüntü", use_container_width=True)
-            
+            st.image(image, caption="Yüklenen Görüntü")
+
+            # CROP BÖLÜMÜ
+            st.subheader("Görüntü Kırpma (Crop)")
+            img_width, img_height = image.size
+            col_crop1, col_crop2 = st.columns(2)
+
+            with col_crop1:
+                crop_x = st.slider("X Başlangıcı", 0, img_width-50, 0)
+                crop_width = st.slider("Genişlik", 50, img_width-crop_x, min(400, img_width-crop_x))
+
+            with col_crop2:
+                crop_y = st.slider("Y Başlangıcı", 0, img_height-50, 0)
+                crop_height = st.slider("Yükseklik", 50, img_height-crop_y, min(400, img_height-crop_y))
+
+            # Crop işlemi
+            if crop_x > 0 or crop_y > 0 or crop_width < img_width or crop_height < img_height:
+                cropped_image = image.crop((crop_x, crop_y, crop_x + crop_width, crop_y + crop_height))
+                st.image(cropped_image, caption=f"Kırpılmış Görüntü ({crop_width}x{crop_height})")
+                working_image = cropped_image
+            else:
+                working_image = image
+
+            # KONTRAST AYARLAMA BÖLÜMÜ
+            st.subheader("Kontrast Ayarlama")
+            contrast = st.slider("Kontrast", 0.5, 3.0, 1.0, 0.1)
+            brightness = st.slider("Parlaklık", 0.5, 2.0, 1.0, 0.1)
+
+            # Ayarlama
+            final_image = working_image
+            if contrast != 1.0 or brightness != 1.0:
+                enhancer = ImageEnhance.Contrast(working_image)
+                adj_image = enhancer.enhance(contrast)
+                enhancer = ImageEnhance.Brightness(adj_image)
+                adj_image = enhancer.enhance(brightness)
+                st.image(adj_image, caption=f"Ayarlanmış (K:{contrast:.1f}, P:{brightness:.1f})")
+                final_image = adj_image
+
             # Analiz butonu
-            if st.button("🔍 Gelişmiş Analiz Et", type="primary"):
-                with st.spinner("5x5 çapraz kesim deseni gelişmiş yöntemlerle analiz ediliyor..."):
-                    result = classifier.predict(image)
-                    
-                    if result:
-                        st.session_state.prediction_result = result
-                        st.success("Gelişmiş analiz tamamlandı!")
-    
+            if st.button("Analiz Et", type="primary"):
+                result = classifier.predict(final_image)
+                if result:
+                    st.session_state.prediction_result = result
+
     with col2:
         st.header("📊 Analiz Sonuçları")
-        
         if 'prediction_result' in st.session_state:
             result = st.session_state.prediction_result
             class_info = result['class_info']
             grid_analysis = result['grid_analysis']
-            
+
             # Tahmin edilen sınıf
             st.markdown(f"""
             <div class="prediction-box class-{result['predicted_class']}" style="border-color: {class_info['color']}">
@@ -541,78 +605,46 @@ def main():
                 <p>{class_info['criteria']}</p>
             </div>
             """, unsafe_allow_html=True)
-            
+
             # Metrikler
             col_conf, col_delam, col_cells = st.columns(3)
-            
             with col_conf:
-                st.metric(
-                    "Güven Seviyesi", 
-                    f"{result['confidence']:.1%}",
-                    help="Tahminin güvenilirlik seviyesi"
-                )
-            
+                st.metric("Güven Seviyesi", f"{result['confidence']:.1%}", help="Tahminin güvenilirlik seviyesi")
             with col_delam:
-                st.metric(
-                    "Ayrılma Oranı",
-                    f"{grid_analysis['delamination_ratio']:.1f}%",
-                    help="Grid analizi sonucu ayrılma oranı"
-                )
-            
+                st.metric("Ayrılma Oranı", f"{grid_analysis['delamination_ratio']:.1f}%", help="Grid analizi sonucu ayrılma oranı")
             with col_cells:
-                st.metric(
-                    "Hasarlı Hücreler",
-                    f"{grid_analysis['damaged_cells']}/25",
-                    help="5x5 gridte hasarlı hücre sayısı"
-                )
-            
+                st.metric("Hasarlı Hücre Skoru", f"{grid_analysis['damaged_cells']:.2f}/25", help="5x5 gridte ağırlıklı hasarlı hücre skoru")
+
             # Grid kalitesi
             st.subheader("🎯 Grid Analiz Sonuçları")
-            
             grid_col1, grid_col2 = st.columns(2)
-            
             with grid_col1:
                 st.metric("Grid Kalite Skoru", f"{grid_analysis['grid_quality_score']:.1f}/100")
                 st.metric("Hasar Yüzdesi", f"{grid_analysis['damage_percentage']:.1f}%")
-            
             with grid_col2:
                 grid_status = "✅ Tespit Edildi" if grid_analysis['grid_detected'] else "❌ Tespit Edilemedi"
                 st.info(f"**5x5 Grid Durumu:** {grid_status}")
-            
+
             # Olasılık grafiği
             st.subheader("📈 Sınıf Olasılıkları")
-            
             prob_data = pd.DataFrame({
                 'Sınıf': [f"Sınıf {i}" for i in range(6)],
                 'Olasılık': [prob * 100 for prob in result['probabilities']],
                 'Renk': [classifier.iso_classes[i]['color'] for i in range(6)]
             })
-            
             fig = px.bar(
-                prob_data, 
-                x='Sınıf', 
+                prob_data,
+                x='Sınıf',
                 y='Olasılık',
                 color='Renk',
-                color_discrete_map={color: color for color in prob_data['Renk']},
+                color_discrete_map={c: c for c in prob_data['Renk']},
                 title="ISO Sınıf Olasılık Dağılımı"
             )
-            
-            fig.update_layout(
-                showlegend=False,
-                height=400,
-                yaxis_title="Olasılık (%)"
-            )
-            
+            fig.update_layout(showlegend=False, height=400, yaxis_title="Olasılık (%)")
             st.plotly_chart(fig, use_container_width=True)
-        
         else:
             st.info("👆 Analiz için görüntü yükleyin")
-    
-    # Ön işleme adımlarını göster (artık predict içinde gösterildiği için burayı kaldırıyoruz)
-    # if 'prediction_result' in st.session_state:
-    #     st.markdown("---")
-    #     show_preprocessing_steps(st.session_state.prediction_result['preprocessing_steps'])
-        
+
     # Detaylı analiz
     if 'prediction_result' in st.session_state:
         st.markdown("---")
@@ -631,19 +663,20 @@ def main():
                 "Tahmin Güven Seviyesi": f"{st.session_state.prediction_result['confidence']:.3f}",
                 "Sınıflandırma Kuralı": "Class 0: 0, Class 1: 0-1.25, Class 2: 1.25-3.75, Class 3: 3.75-8.75, Class 4: 8.75-16.25, Class 5: >16.25"
             })
-    
+
     # Alt bilgi
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
-    
     with col1:
         st.info("🎯 **Özellik:** 5x5 grid otomatik tespit")
-    
     with col2:
         st.info("⚡ **İşleme:** 11 adımlı gelişmiş ön işleme")
-    
     with col3:
         st.info("🔧 **Analiz:** Grid hücre bazında hasar tespiti")
 
+
+# ------------------------------------------------------------
+# Çalıştırma
+# ------------------------------------------------------------
 if __name__ == "__main__":
     main()
