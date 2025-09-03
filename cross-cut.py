@@ -620,8 +620,9 @@ def main():
             grid_data = st.session_state.prediction_result['grid_analysis']
             st.json({
                 "Analiz Metodu": grid_data.get('analysis_method', 'Processed Image Analysis'),
-                "Ortalama Parlaklık": f"{grid_data.get('mean_brightness', 0):.1f}",
-                "Dinamik Threshold": f"{grid_data.get('damage_threshold', 0):.1f}",
+                "Yüzey Tipi": grid_data.get('surface_type', 'Unknown'),
+                "Hasar Tespit Metodu": grid_data.get('damage_detection_method', 'Unknown'),
+                "Grid Bölgesi": f"x:{grid_data.get('grid_region', {}).get('x', 0)}, y:{grid_data.get('grid_region', {}).get('y', 0)}, w:{grid_data.get('grid_region', {}).get('width', 0)}, h:{grid_data.get('grid_region', {}).get('height', 0)}",
                 "Grid Tespit Durumu": grid_data['grid_detected'],
                 "Grid Kalite Skoru": f"{grid_data['grid_quality_score']:.1f}/100",
                 "Ağırlıklı Hasarlı Hücre Skoru": f"{grid_data['damaged_cells']:.2f}/25",
