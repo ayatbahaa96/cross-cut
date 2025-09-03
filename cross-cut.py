@@ -62,6 +62,38 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------
+# Yardımcı fonksiyonlar (Auto-crop için)
+# ------------------------------------------------------------
+def pil_to_rgb_np(img: Image.Image) -> np.ndarray:
+    if img.mode == 'RGBA':
+        bg = Image.new('RGB', img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+    return np.array(img)
+
+def draw_square_overlay(pil_img: Image.Image, cx: int, cy: int, size: int, color=(0,255,0), thickness=3) -> np.ndarray:
+    """Merkezi (cx,cy) ve kenarı size olan kareyi görselin üstüne çizer, RGB NumPy döner."""
+    img = pil_to_rgb_np(pil_img).copy()
+    h, w = img.shape[:2]
+    half = size // 2
+    x1, y1 = max(0, cx - half), max(0, cy - half)
+    x2, y2 = min(w - 1, cx + half), min(h - 1, cy + half)
+    bgr = img[:, :, ::-1].copy()  # OpenCV BGR ile çizer
+    cv2.rectangle(bgr, (x1, y1), (x2, y2), (color[2], color[1], color[0]), thickness)
+    return bgr[:, :, ::-1]  # tekrar RGB
+
+def crop_square(pil_img: Image.Image, cx: int, cy: int, size: int) -> Image.Image:
+    img = pil_to_rgb_np(pil_img)
+    h, w = img.shape[:2]
+    half = size // 2
+    x1, y1 = max(0, cx - half), max(0, cy - half)
+    x2, y2 = min(w, cx + half), min(h, cy + half)
+    cropped = img[y1:y2, x1:x2]
+    return Image.fromarray(cropped)
+
+# ------------------------------------------------------------
 # Yardımcı: Ön işleme adımlarını göster
 # ------------------------------------------------------------
 def show_preprocessing_steps(preprocessing_steps):
@@ -315,7 +347,7 @@ class CrosscutClassifier:
     def analyze_5x5_grid_original(self, original_image):
         """5x5 grid analizi - SADECE GRID BÖLGESİNDE, RENK UYUMLU"""
 
-        # >>> Güvenli giriş dönüşümü (PIL -> NumPy)
+        # Güvenli giriş dönüşümü (PIL -> NumPy)
         if isinstance(original_image, Image.Image):
             if original_image.mode == 'RGBA':
                 bg = Image.new('RGB', original_image.size, (255, 255, 255))
@@ -326,7 +358,6 @@ class CrosscutClassifier:
             work_image = np.array(original_image)
         else:
             work_image = original_image
-        # <<<
 
         if len(work_image.shape) == 3:
             gray = cv2.cvtColor(work_image, cv2.COLOR_RGB2GRAY)
@@ -448,13 +479,11 @@ class CrosscutClassifier:
         show_preprocessing_steps(preprocessing_steps)
 
         st.info("ADIM 2: 5x5 Grid analizi başlıyor... (Ayarlanmış görüntü kullanılıyor)")
-        # >>> Daima NumPy'a çevirerek analize gönder
         if isinstance(image, Image.Image):
             safe_np = np.array(image.convert('RGB'))
         else:
             safe_np = image
         grid_analysis = self.analyze_5x5_grid_original(safe_np)
-        # <<<
         st.success("Grid analizi tamamlandı!")
 
         st.info("ADIM 3: Model tahmini başlıyor...")
@@ -547,47 +576,58 @@ def main():
             image = Image.open(uploaded_file)
             st.image(image, caption="Yüklenen Görüntü")
 
-            # CROP BÖLÜMÜ
-            st.subheader("Görüntü Kırpma (Crop)")
+            # ============ YENİ: Otomatik + Elle ayarlanabilir KARE CROP ============
+            st.subheader("Kare Seçimi (Otomatik + Elle Ayar)")
+
             img_width, img_height = image.size
-            col_crop1, col_crop2 = st.columns(2)
+            # Otomatik öneri: grid tespitinden; yoksa merkez
+            try:
+                auto_region = classifier.detect_crosscut_grid_region(image)
+                auto_size = int(min(auto_region['width'], auto_region['height']))
+                auto_cx  = int(auto_region['x'] + auto_region['width'] // 2)
+                auto_cy  = int(auto_region['y'] + auto_region['height'] // 2)
+            except Exception:
+                auto_cx, auto_cy = img_width // 2, img_height // 2
+                auto_size = int(min(img_width, img_height) * 0.6)
 
-            with col_crop1:
-                crop_x = st.slider("X Başlangıcı", 0, img_width-50, 0)
-                crop_width = st.slider("Genişlik", 50, img_width-crop_x, min(400, img_width-crop_x))
+            col_sq1, col_sq2, col_sq3 = st.columns(3)
+            with col_sq1:
+                cx = st.slider("Merkez X", 0, img_width - 1, auto_cx, step=1)
+            with col_sq2:
+                cy = st.slider("Merkez Y", 0, img_height - 1, auto_cy, step=1)
+            with col_sq3:
+                size = st.slider("Kare Boyutu", 50, min(img_width, img_height), auto_size, step=5)
 
-            with col_crop2:
-                crop_y = st.slider("Y Başlangıcı", 0, img_height-50, 0)
-                crop_height = st.slider("Yükseklik", 50, img_height-crop_y, min(400, img_height-crop_y))
+            # Ön izleme - kare konturu çiz
+            preview = draw_square_overlay(image, cx, cy, size, color=(0,255,0), thickness=3)
+            st.image(preview, caption="Ön İzleme (Kare konturlu)")
 
-            # Crop işlemi
-            if crop_x > 0 or crop_y > 0 or crop_width < img_width or crop_height < img_height:
-                cropped_image = image.crop((crop_x, crop_y, crop_x + crop_width, crop_y + crop_height))
-                st.image(cropped_image, caption=f"Kırpılmış Görüntü ({crop_width}x{crop_height})")
-                working_image = cropped_image
-            else:
-                working_image = image
+            # Kırp ve analiz et
+            if st.button("Kırp ve Analiz Et", type="primary"):
+                cropped_image = crop_square(image, cx, cy, size)
+                st.image(cropped_image, caption=f"Kırpılmış Görüntü ({size}x{size})")
 
-            # KONTRAST AYARLAMA BÖLÜMÜ
-            st.subheader("Kontrast Ayarlama")
-            contrast = st.slider("Kontrast", 0.5, 3.0, 1.0, 0.1)
-            brightness = st.slider("Parlaklık", 0.5, 2.0, 1.0, 0.1)
+                # KONTRAST AYARLAMA
+                st.subheader("Kontrast Ayarlama")
+                contrast = st.slider("Kontrast", 0.5, 3.0, 1.0, 0.1, key="contrast_after_crop")
+                brightness = st.slider("Parlaklık", 0.5, 2.0, 1.0, 0.1, key="brightness_after_crop")
 
-            # Ayarlama
-            final_image = working_image
-            if contrast != 1.0 or brightness != 1.0:
-                enhancer = ImageEnhance.Contrast(working_image)
-                adj_image = enhancer.enhance(contrast)
-                enhancer = ImageEnhance.Brightness(adj_image)
-                adj_image = enhancer.enhance(brightness)
-                st.image(adj_image, caption=f"Ayarlanmış (K:{contrast:.1f}, P:{brightness:.1f})")
-                final_image = adj_image
+                final_image = cropped_image
+                if contrast != 1.0 or brightness != 1.0:
+                    enhancer = ImageEnhance.Contrast(cropped_image)
+                    adj_image = enhancer.enhance(contrast)
+                    enhancer = ImageEnhance.Brightness(adj_image)
+                    adj_image = enhancer.enhance(brightness)
+                    st.image(adj_image, caption=f"Ayarlanmış (K:{contrast:.1f}, P:{brightness:.1f})")
+                    final_image = adj_image
 
-            # Analiz butonu
-            if st.button("Analiz Et", type="primary"):
+                # Analiz
                 result = classifier.predict(final_image)
                 if result:
                     st.session_state.prediction_result = result
+            else:
+                st.info("▶ Kareyi konumlandırıp **Kırp ve Analiz Et** butonuna basın.")
+            # =======================================================================
 
     with col2:
         st.header("📊 Analiz Sonuçları")
@@ -643,7 +683,7 @@ def main():
             fig.update_layout(showlegend=False, height=400, yaxis_title="Olasılık (%)")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("👆 Analiz için görüntü yükleyin")
+            st.info("👆 Analiz için kareyi seçip kırpın")
 
     # Detaylı analiz
     if 'prediction_result' in st.session_state:
