@@ -5,6 +5,7 @@ import tensorflow as tf
 from PIL import Image, ImageEnhance
 import plotly.express as px
 import pandas as pd
+import os
 
 # ------------------------------------------------------------
 # Sayfa konfigürasyonu
@@ -54,7 +55,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------
-# Auto-crop ve maskeleme için yardımcılar
+# Yardımcılar
 # ------------------------------------------------------------
 def pil_to_rgb_np(img: Image.Image) -> np.ndarray:
     if img.mode == 'RGBA':
@@ -85,7 +86,7 @@ def crop_square(pil_img: Image.Image, cx: int, cy: int, size: int) -> Image.Imag
     return Image.fromarray(cropped)
 
 def make_cut_mask(grid_gray: np.ndarray, thickness_px: int) -> np.ndarray:
-    """Kesik çizgileri maskele: çizgileri bul, kalınlaştır, 0/255 maske üret."""
+    """Kesik çizgilerini maskele: çizgileri bul, kalınlaştır, 0/255 maske üret."""
     edges = cv2.Canny(grid_gray, 30, 100)
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=40,
                             minLineLength=max(20, grid_gray.shape[1] // 3),
@@ -98,17 +99,27 @@ def make_cut_mask(grid_gray: np.ndarray, thickness_px: int) -> np.ndarray:
     return mask
 
 def make_flake_mask_rgb(grid_rgb: np.ndarray, surface_type: str) -> np.ndarray:
-    """Hücre içi 'pul' (flake) maskesi: renkli zeminde beyaz; beyaz zeminde koyu alan."""
-    r = grid_rgb[:, :, 0]; g = grid_rgb[:, :, 1]; b = grid_rgb[:, :, 2]
-    if surface_type in ["red", "green", "blue", "dark", "grayscale"]:
-        flake = ((r > 200) & (g > 200) & (b > 200)).astype(np.uint8) * 255
-    else:  # white
-        flake = ((r < 80) & (g < 80) & (b < 80)).astype(np.uint8) * 255
+    """
+    Adaptif flake maskesi:
+    - HSV/V kanalında Otsu ile hem 'parlak' hem 'koyu' eşik.
+    - Beyaz zeminde koyuyu, koyu/renkli zeminde parlak flake'i tercih et.
+    """
+    hsv = cv2.cvtColor(grid_rgb, cv2.COLOR_RGB2HSV)
+    v = hsv[:, :, 2]
+
+    _, dark = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, bright = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    if surface_type == "white":
+        flake = dark
+    else:
+        flake = bright
+
     flake = cv2.morphologyEx(flake, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     return flake
 
 # ------------------------------------------------------------
-# Ön işleme adımlarını göster
+# Ön işleme adımları gösterimi
 # ------------------------------------------------------------
 def show_preprocessing_steps(preprocessing_steps):
     st.markdown("""
@@ -163,19 +174,31 @@ class CrosscutClassifier:
             5: {"name": "Sınıf 5","description": "Herhangi bir derece, sıkıntılanma pulları","criteria": "Çok zayıf yapışma, yaygın ayrılma","quality": "Çok Zayıf","color": "#c0392b"}
         }
         self.model = None
+        self.using_demo_model = True
         self.load_model()
 
     def load_model(self):
+        """
+        Eğitimli model varsa kullan, yoksa demo modele düş.
+        """
         try:
-            self.model = self.create_demo_model()
-            return True
+            model_path = "model_iso2409.h5"
+            if os.path.exists(model_path):
+                self.model = tf.keras.models.load_model(model_path)
+                self.using_demo_model = False
+            else:
+                self.model = self.create_demo_model()
+                self.using_demo_model = True
         except Exception as e:
-            st.error(f"Model yüklenemedi: {e}")
-            return False
+            st.warning(f"Eğitimli model yüklenemedi, demo modele düşüldü: {e}")
+            self.model = self.create_demo_model()
+            self.using_demo_model = True
+        return True
 
     def create_demo_model(self):
         model = tf.keras.Sequential([
-            tf.keras.layers.Conv2D(32, (3, 3), activation='relu', input_shape=(224, 224, 3)),
+            tf.keras.layers.Input(shape=(224, 224, 3)),
+            tf.keras.layers.Conv2D(32, (3, 3), activation='relu'),
             tf.keras.layers.MaxPooling2D(2, 2),
             tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
             tf.keras.layers.MaxPooling2D(2, 2),
@@ -280,7 +303,15 @@ class CrosscutClassifier:
         }
 
     # ------------------------- 5x5 Analizi (kesikler maskeli) -------------------------
-    def analyze_5x5_grid_original(self, original_image, spacing_mm: int = 1, strict_cell_damage: bool = True):
+    def analyze_5x5_grid_original(
+        self,
+        original_image,
+        spacing_mm: int = 1,
+        strict_cell_damage: bool = True,
+        flake_ratio_thr: float = 0.003,
+        min_pix_ratio: float = 0.001,
+        return_debug: bool = False
+    ):
         """Yalnızca hücre içi kopmaları say (kesik çizgileri hariç). spacing_mm: 1/2/3."""
         # PIL -> NumPy
         if isinstance(original_image, Image.Image):
@@ -315,18 +346,18 @@ class CrosscutClassifier:
                     vert.append(line)
             grid_quality_score = min(len(horiz), len(vert)) / 6 * 100
 
-        # Yüzey tipi
+        # Yüzey tipi (kabaca)
         mean_r, mean_g, mean_b = np.mean(grid_rgb[:,:,0]), np.mean(grid_rgb[:,:,1]), np.mean(grid_rgb[:,:,2])
         if mean_r > mean_g and mean_r > mean_b and mean_r > 150:
-            surface_type = "red";   damage_detection_method = "flakes_excluding_cuts"
+            surface_type = "red"
         elif mean_g > mean_r and mean_g > mean_b and mean_g > 150:
-            surface_type = "green"; damage_detection_method = "flakes_excluding_cuts"
+            surface_type = "green"
         elif mean_b > mean_r and mean_b > mean_g and mean_b > 150:
-            surface_type = "blue";  damage_detection_method = "flakes_excluding_cuts"
+            surface_type = "blue"
         elif mean_r > 200 and mean_g > 200 and mean_b > 200:
-            surface_type = "white"; damage_detection_method = "flakes_excluding_cuts"
+            surface_type = "white"
         else:
-            surface_type = "dark";  damage_detection_method = "flakes_excluding_cuts"
+            surface_type = "dark"
 
         # Hücre boyutu ve piksel/mm tahmini
         height, width = grid_gray.shape
@@ -334,20 +365,20 @@ class CrosscutClassifier:
         px_per_mm = max(1.0, ((cell_w + cell_h) / 2.0) / float(spacing_mm))
 
         # Dinamik eşikler
-        thickness_px = int(np.clip(round(0.35 * px_per_mm), 2, 14))      # kesik kalınlığı maskesi
+        thickness_px = int(np.clip(round(0.35 * px_per_mm), 2, 14))  # kesik kalınlığı maskesi
         cell_area = cell_w * cell_h
         if strict_cell_damage:
-            FLAKE_RATIO_THR = 0.003   # %0.3 hücre alanı
-            MIN_PIX = max(5, int(0.001 * cell_area))
+            FLAKE_RATIO_THR = float(flake_ratio_thr)     # varsayılan %0.3
+            MIN_PIX = max(5, int(min_pix_ratio * cell_area))
         else:
-            FLAKE_RATIO_THR = 0.02
-            MIN_PIX = max(30, int(0.005 * cell_area))
+            FLAKE_RATIO_THR = max(float(flake_ratio_thr), 0.01)
+            MIN_PIX = max(30, int(max(min_pix_ratio, 0.005) * cell_area))
 
         # 1) Kesik çizgisi maskesi
         cut_mask = make_cut_mask(grid_gray, thickness_px)
         interior_mask = cv2.bitwise_not(cut_mask)
 
-        # 2) Flake maskesi
+        # 2) Flake maskesi (adaptif)
         flake_mask = make_flake_mask_rgb(grid_rgb, surface_type)
 
         # 3) Yalnızca kesik dışı flake
@@ -377,10 +408,10 @@ class CrosscutClassifier:
         # Ayrılma oranı: kesik hariç grid alanında flake yüzdesi
         delamination_ratio = 100.0 * (flake_interior_total / interior_total) if interior_total > 0 else 0.0
 
-        return {
+        result = {
             'grid_quality_score': float(grid_quality_score),
             'delamination_ratio': float(delamination_ratio),
-            'damaged_cells': float(total_damaged_cells),  # 0..25 tam sayı olur
+            'damaged_cells': float(total_damaged_cells),  # 0..25
             'total_cells': 25,
             'damage_percentage': (total_damaged_cells / 25.0) * 100.0,
             'cell_damage_scores': [float(x) for x in cell_damage_scores],
@@ -388,7 +419,6 @@ class CrosscutClassifier:
             'analysis_method': f'Grid Region Analysis - {surface_type} (cuts masked)',
             'surface_type': surface_type,
             'grid_region': {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)},
-            'damage_detection_method': damage_detection_method,
             'spacing_mm': spacing_mm,
             'px_per_mm': px_per_mm,
             'cut_thickness_px': thickness_px,
@@ -397,8 +427,25 @@ class CrosscutClassifier:
             'min_pix': MIN_PIX
         }
 
+        if return_debug:
+            result['debug_masks'] = {
+                'cut_mask': cut_mask,
+                'flake_mask': flake_mask,
+                'flake_mask_interior': flake_mask_interior
+            }
+
+        return result
+
     # ------------------------- PREDICT -------------------------
-    def predict(self, image, spacing_mm: int = 1, strict_cell_damage: bool = True):
+    def predict(
+        self,
+        image,
+        spacing_mm: int = 1,
+        strict_cell_damage: bool = True,
+        flake_ratio_thr: float = 0.003,
+        min_pix_ratio: float = 0.001,
+        return_debug: bool = False
+    ):
         if self.model is None:
             return None
         st.info("ADIM 1: Görüntü ön işleme başlıyor...")
@@ -408,14 +455,25 @@ class CrosscutClassifier:
 
         st.info("ADIM 2: 5x5 Grid analizi başlıyor...")
         safe_np = np.array(image.convert('RGB')) if isinstance(image, Image.Image) else image
-        grid_analysis = self.analyze_5x5_grid_original(safe_np, spacing_mm=spacing_mm, strict_cell_damage=strict_cell_damage)
+        grid_analysis = self.analyze_5x5_grid_original(
+            safe_np,
+            spacing_mm=spacing_mm,
+            strict_cell_damage=strict_cell_damage,
+            flake_ratio_thr=flake_ratio_thr,
+            min_pix_ratio=min_pix_ratio,
+            return_debug=return_debug
+        )
         st.success("Grid analizi tamamlandı!")
 
         st.info("ADIM 3: Model tahmini başlıyor...")
-        _ = self.model.predict(processed_input)[0]  # demo
-        predictions = self.generate_realistic_predictions(
-            damaged_cells_count=round(grid_analysis['damaged_cells'])
-        )
+        if not self.using_demo_model:
+            # Eğitimli model varsa onu kullan
+            predictions = self.model.predict(processed_input, verbose=0)[0]
+        else:
+            # Kural tabanlı olasılık: güven sabit değil, hasar şiddetine göre
+            predictions = self.generate_rule_based_predictions(
+                damaged_cells_count=round(grid_analysis['damaged_cells'])
+            )
         predicted_class = int(np.argmax(predictions))
         confidence = float(predictions[predicted_class])
         st.success("Model tahmini tamamlandı!")
@@ -426,10 +484,11 @@ class CrosscutClassifier:
             'probabilities': predictions.tolist(),
             'grid_analysis': grid_analysis,
             'preprocessing_steps': preprocessing_steps,
-            'class_info': self.iso_classes[predicted_class]
+            'class_info': self.iso_classes[predicted_class],
+            'used_demo_model': self.using_demo_model
         }
 
-    def generate_realistic_predictions(self, damaged_cells_count: int):
+    def generate_rule_based_predictions(self, damaged_cells_count: int):
         """
         Sınıf eşleme tamamen hücre adedine göre:
           0 hücre -> Class 0
@@ -438,6 +497,7 @@ class CrosscutClassifier:
           4-8     -> Class 3
           9-16    -> Class 4
           17-25   -> Class 5
+        Güven, hasar yüzdesine göre 0.55–0.95 arası ölçeklenir.
         """
         n = int(damaged_cells_count)
         if n == 0:
@@ -453,11 +513,14 @@ class CrosscutClassifier:
         else:
             dominant = 5
 
+        severity = np.clip(n / 25.0, 0.0, 1.0)
+        main_p = 0.55 + 0.40 * severity
+        side_p = (1.0 - main_p) / 2.0
+
         probs = np.zeros(6, dtype=np.float32)
-        probs[dominant] = 0.88
-        # komşu sınıflara küçük olasılık serpiştir
-        if dominant - 1 >= 0: probs[dominant - 1] = 0.06
-        if dominant + 1 <= 5: probs[dominant + 1] = 0.06
+        probs[dominant] = main_p
+        if dominant - 1 >= 0: probs[dominant - 1] = side_p
+        if dominant + 1 <= 5: probs[dominant + 1] = side_p
         return probs / probs.sum()
 
 # ------------------------------------------------------------
@@ -475,12 +538,17 @@ def main():
         st.session_state.classifier = CrosscutClassifier()
     classifier = st.session_state.classifier
 
-    # Sidebar: standart ve mm seçimi
+    # Sidebar: standart ve eşikler
     with st.sidebar:
         st.header("📋 ISO 2409:2013")
         st.info("📌 Kural: **Hücre içinde kopma yoksa = Class 0**. En küçük kopma varsa sınıf ≥1.")
         spacing_mm = st.radio("Kesik aralığı (mm)", [1, 2, 3], index=0, horizontal=True)
         strict_mode = st.checkbox("Katı hücre kuralı (tavsiye)", value=True)
+        st.markdown("---")
+        st.subheader("Eşikler (ince ayar)")
+        flake_ratio_thr = st.slider("Hücre hasar oran eşiği", 0.001, 0.02, 0.003, 0.001, help="Hücre içindeki flake oranı eşiği")
+        min_pix_ratio   = st.slider("Hücre başı min piksel (oran)", 0.0005, 0.01, 0.001, 0.0005, help="Hücre alanına oranla min flake pikseli")
+        show_debug_masks = st.checkbox("Maske debug görüntülerini göster", value=False)
         st.markdown("---")
         st.write("Sınıf renkleri ve açıklamalar:")
         for i, class_info in classifier.iso_classes.items():
@@ -534,7 +602,14 @@ def main():
                     st.image(adj_image, caption=f"Ayarlanmış (K:{contrast:.1f}, P:{brightness:.1f})")
                     final_image = adj_image
 
-                result = classifier.predict(final_image, spacing_mm=int(spacing_mm), strict_cell_damage=bool(strict_mode))
+                result = classifier.predict(
+                    final_image,
+                    spacing_mm=int(spacing_mm),
+                    strict_cell_damage=bool(strict_mode),
+                    flake_ratio_thr=float(flake_ratio_thr),
+                    min_pix_ratio=float(min_pix_ratio),
+                    return_debug=bool(show_debug_masks)
+                )
                 if result:
                     st.session_state.prediction_result = result
             else:
@@ -573,6 +648,9 @@ def main():
                 grid_status = "✅ Tespit Edildi" if g['grid_detected'] else "❌ Tespit Edilemedi"
                 st.info(f"**5x5 Grid Durumu:** {grid_status}\n\nKesik kalınlığı (px): {g['cut_thickness_px']}, px/mm: {g['px_per_mm']:.1f}")
 
+            if result.get('used_demo_model', True):
+                st.caption("ℹ️ Eğitimli model bulunamadı; kural tabanlı tahmin kullanıldı.")
+
             st.subheader("📈 Sınıf Olasılıkları")
             prob_data = pd.DataFrame({
                 'Sınıf': [f"Sınıf {i}" for i in range(6)],
@@ -604,6 +682,13 @@ def main():
                 "Hasar Yüzdesi": f"{g['damage_percentage']:.1f}%",
                 "Ayrılma Oranı (kesik hariç)": f"{g['delamination_ratio']:.2f}%"
             })
+            # Debug maskeleri göster
+            if 'debug_masks' in g:
+                st.subheader("🧪 Maske Debug")
+                dm = g['debug_masks']
+                st.image(dm['cut_mask'], caption="Kesik Maskesi", clamp=True)
+                st.image(dm['flake_mask'], caption="Flake Maskesi (adaptif)", clamp=True)
+                st.image(dm['flake_mask_interior'], caption="Kesik Hariç Flake", clamp=True)
 
     st.markdown("---")
     c1, c2, c3 = st.columns(3)
